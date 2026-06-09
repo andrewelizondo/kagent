@@ -239,6 +239,15 @@ type DeclarativeAgentSpec struct {
 	// This includes event compaction (compression) and context caching.
 	// +optional
 	Context *ContextConfig `json:"context,omitempty"`
+
+	// AuraConfigFrom references a ConfigMap or Secret key containing extra Mezmo
+	// AURA TOML that is appended to the config kagent generates from this spec.
+	// Only meaningful when runtime is "aura". Use it for AURA-only features such
+	// as turn_depth, [orchestration], [[vector_stores]], and additional
+	// [mcp.servers.*] tables. The referenced content should add new top-level
+	// tables; it cannot override keys in the generated [agent]/[agent.llm] tables.
+	// +optional
+	AuraConfigFrom *ValueSource `json:"auraConfigFrom,omitempty"`
 }
 
 // SandboxConfig configures sandboxed execution behavior.

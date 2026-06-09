@@ -27,9 +27,40 @@ kubectl get agent -n kagent aura-sre -w
 kagent invoke -t "What can you help an SRE with?" --agent aura-sre --stream
 ```
 
-Supported model providers for the aura runtime today are **OpenAI** and **Anthropic**. The
+Supported model providers for the aura runtime are **OpenAI, Anthropic, Gemini, Bedrock,
+and Ollama**. OpenAI may set a custom `base_url` (self-hosted / proxy / OpenRouter). The
 AURA image defaults to `mezmo/aura:1-latest` and is configurable via the
 `controller.auraImage` Helm value (or the controller `--aura-image` flag).
+
+### Scaffold one with the CLI
+
+```bash
+kagent init aura sre --model-provider Anthropic --model-name claude-sonnet-4-20250514
+# writes sre/manifests.yaml (Secret + ModelConfig + Agent) and sre/README.md
+```
+
+### AURA-only features (orchestration, RAG)
+
+Features without a kagent field (`turn_depth`, `[orchestration]`, `[[vector_stores]]`) are
+supplied as raw TOML via `auraConfigFrom`, which is appended to the generated config:
+
+```yaml
+  declarative:
+    runtime: aura
+    modelConfig: aura-model
+    systemMessage: "…"
+    auraConfigFrom:
+      type: ConfigMap   # or Secret
+      name: aura-sre-overrides
+      key: overrides.toml
+```
+
+```yaml
+# ConfigMap aura-sre-overrides, key overrides.toml
+[orchestration]
+enabled = true
+max_planning_cycles = 3
+```
 
 ## Phase 0 — AURA as a BYO agent
 

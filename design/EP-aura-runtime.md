@@ -1,7 +1,7 @@
 # EP-aura-runtime: First-class support for Mezmo AURA agents
 
 * Issue: TBD (kagent-dev/kagent)
-* Status: provisional (Phase 0 + Phase 1 implemented)
+* Status: provisional (Phase 0, 1, and 2 implemented)
 
 ## Background
 
@@ -129,12 +129,15 @@ The agent translator gains an AURA path (sibling to the ADK path in
 
 1. **Renders the TOML** from the CRD (`renderAuraConfigTOML`):
    - `declarative.systemMessage` / `systemMessageFrom` -> `[agent].system_prompt`
-   - `declarative.modelConfig` -> `[agent.llm]` (`provider`, `model`,
-     `api_key = "{{ env.<VAR> }}"`). The `ModelProvider` enum maps onto AURA's provider
-     strings; **v1 supports `OpenAI` -> `openai` and `Anthropic` -> `anthropic`** and
-     returns a clear validation error for other providers rather than emitting broken
-     config. (Bedrock/Azure/Vertex have multi-value or file-based auth that needs more
-     than a single API-key env; deferred.)
+   - `declarative.modelConfig` -> `[agent.llm]` (`provider`, `model`, and `api_key`,
+     `base_url`, or `region` as appropriate). The `ModelProvider` enum maps onto AURA's
+     provider strings: **`OpenAI`->`openai`, `Anthropic`->`anthropic`, `Gemini`->`gemini`,
+     `Bedrock`->`bedrock`, `Ollama`->`ollama`** (matching AURA's `examples/reference.toml`);
+     unsupported providers (Azure, Vertex, SAP) return a clear validation error rather than
+     emitting broken config. The per-provider env injection (API keys, AWS credentials +
+     region, Ollama base URL) is reused from the existing ADK `translateModel`, so it stays
+     consistent. OpenAI `base_url` is emitted when set (self-hosted / proxy / OpenRouter /
+     mock endpoints); Bedrock emits `region = "{{ env.AWS_REGION }}"`.
    - each `tools[].mcpServer` -> a `[mcp.servers.<name>]` block with
      `transport` (`http_streamable`/`sse`), the resolved in-cluster URL, and `headers`.
      MCP resolution reuses the existing RemoteMCPServer/MCPServer/Service translation
@@ -159,13 +162,24 @@ exposure apply uniformly. `validateRuntimeFeatures` emits a soft warning when an
 configures kagent-ADK-only features (memory, context management, code execution, prompt
 templates) that the runtime ignores.
 
-**Escape hatch for AURA-only features — deferred to Phase 2.** AURA has knobs with no
-kagent equivalent (`turn_depth`, `[orchestration]`, `[[vector_stores]]`). Rather than grow
-the CRD to mirror AURA's whole schema, a future `auraConfigFrom` raw-TOML overlay (a
-ConfigMap merged into the generated config) will expose them. Until then, advanced AURA-only
-deployments can use the Phase 0 BYO path with a hand-authored TOML. Keeping v1 focused on
-generation avoids a half-correct TOML merge and matches the OpenClaw-harness philosophy of
-generating config and letting the backend own the long tail.
+**Escape hatch for AURA-only features — implemented.** AURA has knobs with no kagent
+equivalent (`turn_depth`, `[orchestration]`, `[[vector_stores]]`). Rather than grow the CRD
+to mirror AURA's whole schema, `spec.declarative.auraConfigFrom` references a ConfigMap or
+Secret key whose raw TOML is **appended verbatim** after the generated config:
+
+```yaml
+    runtime: aura
+    auraConfigFrom:
+      type: ConfigMap
+      name: aura-sre-overrides
+      key: overrides.toml
+```
+
+The overlay is appended (not deep-merged) and is intended to add new top-level tables; it
+cannot override keys already emitted in `[agent]`/`[agent.llm]`. This keeps the simple case
+one-field-simple, gives power users AURA's full expressiveness without the CRD chasing
+AURA's release cadence, and avoids a fragile partial TOML merge — matching the
+OpenClaw-harness philosophy of generating config and letting the backend own the long tail.
 
 ### Direction 2 — kagent agents as AURA tools (bidirectional, works today)
 
@@ -211,25 +225,28 @@ back into AURA — all over A2A/MCP, all managed as kagent `Agent`s.
 - **Phase 1 (done)** — `runtime: aura` translator (`aura.go`) + `controller.auraImage`
   Helm value / `--aura-image` flag + OpenAI/Anthropic provider mapping + MCP-tool
   rendering + unit and golden tests + `examples/aura/aura-runtime-agent.yaml`.
-- **Phase 2 (next)** — `auraConfigFrom` raw-TOML overlay; additional providers
-  (Bedrock/Azure/Vertex); E2E coverage against a live AURA image; `kagent init aura`
-  scaffolding; typed orchestration/RAG fields if demand warrants; list AURA agents in
-  the public agent catalog.
+- **Phase 2 (done)** — providers Gemini/Bedrock/Ollama + OpenAI `base_url`;
+  `auraConfigFrom` raw-TOML overlay; `kagent init aura` scaffolding; opt-in E2E test.
+- **Phase 3 (next, if demand warrants)** — typed first-class orchestration/RAG fields;
+  Anthropic `base_url`; promote the E2E test to run-by-default once AURA A2A interop is
+  confirmed in CI; list AURA agents in the public agent catalog (kagent.dev/agents,
+  out-of-repo).
 
 ### Test Plan
 
 - **Unit (Go) — done:** table-driven tests for the AURA TOML renderer and provider mapping
-  (`aura_test.go`): provider mapping for OpenAI/Anthropic and rejection of unsupported
-  providers, TOML basic-string escaping, TOML key sanitization, and full config rendering
-  (with/without MCP servers, sorted headers).
-- **Golden — done:** `testdata/inputs/agent_aura_runtime.yaml` ->
-  `testdata/outputs/agent_aura_runtime.json` exercises the full translation (config Secret
-  with rendered TOML, AURA Deployment with image/env/probe, Service, ServiceAccount) and is
-  checked in CI alongside the existing golden suite.
-- **E2E (Phase 2):** deploy a `runtime: aura` agent against a stub MCP server and a mock
-  model endpoint; assert the pod becomes Ready via the agent-card probe, that `kagent
-  invoke` returns over A2A, and that the agent is invokable as a `type: Agent` tool by a
-  second agent.
+  (`aura_test.go`): mapping for OpenAI/Anthropic/Gemini/Bedrock/Ollama and rejection of
+  unsupported providers, TOML escaping, key sanitization, and full config rendering
+  (servers + sorted headers, base_url, Bedrock region, overlay ordering). CLI scaffolder
+  tests (`frameworks/aura/generator_test.go`) cover provider canonicalization and the
+  per-provider manifest shape.
+- **Golden — done:** `agent_aura_runtime` (OpenAI + MCP tool), `agent_aura_bedrock`
+  (Bedrock region + AWS-cred env), and `agent_aura_overlay` (auraConfigFrom append) exercise
+  the full translation and are checked in CI alongside the existing golden suite.
+- **E2E — done (opt-in):** `TestE2EInvokeAuraAgent` deploys a `runtime: aura` agent against
+  the mock LLM (via the ModelConfig OpenAI `base_url`) and invokes it over A2A. It is gated
+  behind `KAGENT_E2E_AURA=1` because it pulls the third-party `mezmo/aura` image and depends
+  on AURA's A2A interop; promote to default once confirmed in CI.
 
 ## Alternatives
 

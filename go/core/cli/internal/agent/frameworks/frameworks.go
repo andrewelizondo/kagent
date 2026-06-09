@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	adk_python "github.com/kagent-dev/kagent/go/core/cli/internal/agent/frameworks/adk/python"
+	"github.com/kagent-dev/kagent/go/core/cli/internal/agent/frameworks/aura"
 )
 
 // Generator interface for project generation
@@ -21,6 +22,9 @@ func NewGenerator(framework, language string) (Generator, error) {
 		default:
 			return nil, fmt.Errorf("unsupported language '%s' for adk", language)
 		}
+	case "aura":
+		// AURA agents are declarative; language is not applicable.
+		return aura.NewAuraGenerator(), nil
 	default:
 		return nil, fmt.Errorf("unsupported framework: %s", framework)
 	}

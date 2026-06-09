@@ -10,6 +10,7 @@ import (
 
 	"github.com/kagent-dev/kagent/go/api/v1alpha2"
 	"github.com/kagent-dev/kagent/go/core/cli/internal/agent/frameworks"
+	"github.com/kagent-dev/kagent/go/core/cli/internal/agent/frameworks/aura"
 	"github.com/kagent-dev/kagent/go/core/cli/internal/config"
 	"github.com/kagent-dev/kagent/go/core/internal/version"
 )
@@ -31,9 +32,16 @@ func InitCmd(cfg *InitCfg) error {
 		return err
 	}
 
+	// AURA agents are declarative: scaffold manifests instead of a buildable
+	// project. Provider casing is preserved (the ModelConfig CRD expects the
+	// canonical enum value) and the language argument is not used.
+	if cfg.Framework == "aura" {
+		return initAuraAgent(cfg)
+	}
+
 	// Validate framework and language
 	if cfg.Framework != "adk" {
-		return fmt.Errorf("unsupported framework: %s. Only 'adk' is supported", cfg.Framework)
+		return fmt.Errorf("unsupported framework: %s. Supported: 'adk', 'aura'", cfg.Framework)
 	}
 
 	if cfg.Language != "python" {
@@ -91,6 +99,44 @@ func InitCmd(cfg *InitCfg) error {
 	}
 
 	return nil
+}
+
+// initAuraAgent scaffolds a declarative AURA agent (manifests, not a project).
+func initAuraAgent(cfg *InitCfg) error {
+	if cfg.ModelProvider == "" {
+		cfg.ModelProvider = "OpenAI"
+	}
+	provider, ok := aura.CanonicalProvider(cfg.ModelProvider)
+	if !ok {
+		return fmt.Errorf("unsupported model provider %q for aura. Supported: OpenAI, Anthropic, Gemini, Bedrock, Ollama", cfg.ModelProvider)
+	}
+	if cfg.ModelName == "" {
+		return fmt.Errorf("--model-name is required for aura agents")
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get current working directory: %v", err)
+	}
+	projectDir := filepath.Join(cwd, cfg.AgentName)
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		return fmt.Errorf("failed to create project directory: %v", err)
+	}
+
+	var instruction string
+	if cfg.InstructionFile != "" {
+		content, err := os.ReadFile(cfg.InstructionFile)
+		if err != nil {
+			return fmt.Errorf("failed to read instruction file '%s': %v", cfg.InstructionFile, err)
+		}
+		instruction = string(content)
+	}
+
+	generator, err := frameworks.NewGenerator("aura", "")
+	if err != nil {
+		return fmt.Errorf("failed to create generator: %v", err)
+	}
+	return generator.Generate(projectDir, cfg.AgentName, instruction, provider, cfg.ModelName, cfg.Description, cfg.Config.Verbose, "")
 }
 
 // validateModelProvider checks if the provided model provider is supported

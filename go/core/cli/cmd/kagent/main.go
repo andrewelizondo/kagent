@@ -240,29 +240,44 @@ func newRootCommand(ctx context.Context, cfg *config.Config) *cobra.Command {
 	initCmd := &cobra.Command{
 		Use:   "init [framework] [language] [agent-name]",
 		Short: "Initialize a new agent project",
-		Long: `Initialize a new agent project using the specified framework and language.
+		Long: `Initialize a new agent.
+
+ADK agents are scaffolded as a buildable project:
+  kagent init adk python <agent-name>
+
+AURA agents are declarative and scaffolded as Kubernetes manifests (no build):
+  kagent init aura <agent-name>
 
 You can customize the root agent instructions using the --instruction-file flag.
 You can select a specific model using --model-provider and --model-name flags.
-If no custom instruction file is provided, a default dice-rolling instruction will be used.
-If no model is specified, the agent will need to be configured later.
 
 Examples:
   kagent init adk python dice
   kagent init adk python dice --instruction-file instructions.md
-  kagent init adk python dice --model-provider Gemini --model-name gemini-2.0-flash`,
-		Args: cobra.ExactArgs(3),
+  kagent init adk python dice --model-provider Gemini --model-name gemini-2.0-flash
+  kagent init aura sre --model-provider Anthropic --model-name claude-sonnet-4-20250514`,
+		// adk takes 3 args (framework language name); aura takes 2 (framework name).
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 && args[0] == "aura" {
+				return cobra.ExactArgs(2)(cmd, args)
+			}
+			return cobra.ExactArgs(3)(cmd, args)
+		},
 		Run: func(cmd *cobra.Command, args []string) {
 			initCfg.Framework = args[0]
-			initCfg.Language = args[1]
-			initCfg.AgentName = args[2]
+			if args[0] == "aura" {
+				initCfg.AgentName = args[1]
+			} else {
+				initCfg.Language = args[1]
+				initCfg.AgentName = args[2]
+			}
 
 			if err := cli.InitCmd(initCfg); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
 		},
-		Example: `kagent init adk python dice`,
+		Example: `kagent init aura sre --model-provider Anthropic --model-name claude-sonnet-4-20250514`,
 	}
 
 	// Add flags for custom instructions and model selection

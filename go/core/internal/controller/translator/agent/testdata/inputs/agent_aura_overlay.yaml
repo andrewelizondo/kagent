@@ -1,0 +1,47 @@
+operation: translateAgent
+targetObject: aura-overlay
+namespace: test
+objects:
+  - apiVersion: v1
+    kind: Secret
+    metadata:
+      name: openai-secret
+      namespace: test
+    data:
+      api-key: c2stdGVzdC1hcGkta2V5  # base64 "sk-test-api-key"
+  - apiVersion: kagent.dev/v1alpha2
+    kind: ModelConfig
+    metadata:
+      name: test-model
+      namespace: test
+    spec:
+      provider: OpenAI
+      model: gpt-4o
+      apiKeySecret: openai-secret
+      apiKeySecretKey: api-key
+  - apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: aura-overrides
+      namespace: test
+    data:
+      overrides.toml: |
+        [orchestration]
+        enabled = true
+        max_planning_cycles = 3
+  - apiVersion: kagent.dev/v1alpha2
+    kind: Agent
+    metadata:
+      name: aura-overlay
+      namespace: test
+    spec:
+      type: Declarative
+      declarative:
+        runtime: aura
+        description: An AURA agent with an orchestration overlay
+        systemMessage: You are an SRE orchestrator.
+        modelConfig: test-model
+        auraConfigFrom:
+          type: ConfigMap
+          name: aura-overrides
+          key: overrides.toml

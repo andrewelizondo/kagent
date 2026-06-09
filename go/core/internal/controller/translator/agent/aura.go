@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
 	"slices"
 	"strings"
@@ -46,20 +45,40 @@ type auraConfigInput struct {
 	Name         string
 	SystemPrompt string
 	Provider     string
-	APIKeyEnv    string
-	Model        string
-	Servers      []auraMCPServer
+	// APIKeyEnv, when non-empty, renders api_key = "{{ env.<APIKeyEnv> }}".
+	APIKeyEnv string
+	Model     string
+	// BaseURL, when non-empty, renders base_url (custom OpenAI-compatible endpoint).
+	BaseURL string
+	// Region, when non-empty, renders a region key (Bedrock).
+	Region  string
+	Servers []auraMCPServer
+	// Overlay is optional raw TOML appended verbatim after the generated config.
+	Overlay string
 }
 
 // auraProviderConfig maps a kagent ModelProvider to AURA's provider string and
-// the environment variable AURA expects the API key under. The boolean reports
-// whether the provider is supported by the aura runtime.
+// the environment variable AURA expects the API key under (empty when the
+// provider does not use a single API key, e.g. Bedrock/Ollama). The boolean
+// reports whether the provider is supported by the aura runtime.
+//
+// AURA supports openai, anthropic, gemini, bedrock, and ollama (see
+// github.com/mezmo/aura examples/reference.toml).
 func auraProviderConfig(provider v1alpha2.ModelProvider) (auraProvider, apiKeyEnv string, ok bool) {
 	switch provider {
 	case v1alpha2.ModelProviderOpenAI:
 		return "openai", env.OpenAIAPIKey.Name(), true
 	case v1alpha2.ModelProviderAnthropic:
 		return "anthropic", env.AnthropicAPIKey.Name(), true
+	case v1alpha2.ModelProviderGemini:
+		return "gemini", env.GoogleAPIKey.Name(), true
+	case v1alpha2.ModelProviderBedrock:
+		// Bedrock authenticates via AWS credentials/region (injected as env by
+		// translateModel), not a single api_key.
+		return "bedrock", "", true
+	case v1alpha2.ModelProviderOllama:
+		// Ollama uses no API key; the server URL is injected as env by translateModel.
+		return "ollama", "", true
 	default:
 		return "", "", false
 	}
@@ -83,7 +102,7 @@ func (a *adkApiTranslator) compileAuraAgent(ctx context.Context, agent v1alpha2.
 	auraProvider, apiKeyEnv, ok := auraProviderConfig(model.Spec.Provider)
 	if !ok {
 		return "", nil, nil, NewValidationError(
-			"aura runtime does not support model provider %q (supported: OpenAI, Anthropic)",
+			"aura runtime does not support model provider %q (supported: OpenAI, Anthropic, Gemini, Bedrock, Ollama)",
 			model.Spec.Provider,
 		)
 	}
@@ -101,11 +120,36 @@ func (a *adkApiTranslator) compileAuraAgent(ctx context.Context, agent v1alpha2.
 		return "", nil, nil, err
 	}
 
-	// Fold the model's resolved Secret hash into the rollout signal so an
-	// in-place API-key rotation restarts the pod.
-	if model.Status.SecretHash != "" {
-		if decoded, decErr := hex.DecodeString(model.Status.SecretHash); decErr == nil {
-			secretHashBytes = append(secretHashBytes, decoded...)
+	// Reuse the ADK model translation purely for its deployment data: the
+	// provider-specific env injection (API keys, AWS credentials + region,
+	// Ollama base URL, ...) and the Secret hash that drives a rollout on
+	// rotation. The returned adk.Model is not used by AURA.
+	_, mdd, modelHash, err := a.translateModel(ctx, model.Namespace, model.Name)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	secretHashBytes = append(secretHashBytes, modelHash...)
+
+	// Bedrock renders a region (sourced from the AWS_REGION env that
+	// translateModel injects) instead of an api_key.
+	region := ""
+	if model.Spec.Provider == v1alpha2.ModelProviderBedrock {
+		region = "{{ env." + env.AWSRegion.Name() + " }}"
+	}
+
+	// Custom OpenAI-compatible endpoint (self-hosted, proxy, OpenRouter, ...).
+	baseURL := ""
+	if model.Spec.Provider == v1alpha2.ModelProviderOpenAI && model.Spec.OpenAI != nil {
+		baseURL = model.Spec.OpenAI.BaseURL
+	}
+
+	// Optional raw-TOML overlay for AURA-only features (turn_depth,
+	// [orchestration], [[vector_stores]], extra [mcp.servers.*]).
+	overlay := ""
+	if decl.AuraConfigFrom != nil {
+		overlay, err = decl.AuraConfigFrom.Resolve(ctx, a.kube, agent.GetNamespace())
+		if err != nil {
+			return "", nil, nil, fmt.Errorf("failed to resolve auraConfigFrom: %w", err)
 		}
 	}
 
@@ -115,26 +159,13 @@ func (a *adkApiTranslator) compileAuraAgent(ctx context.Context, agent v1alpha2.
 		Provider:     auraProvider,
 		APIKeyEnv:    apiKeyEnv,
 		Model:        model.Spec.Model,
+		BaseURL:      baseURL,
+		Region:       region,
 		Servers:      servers,
+		Overlay:      overlay,
 	})
 
-	// Inject the API key from the ModelConfig Secret. The {{ env.<VAR> }}
-	// placeholder in the rendered TOML resolves against this env var, so the
-	// key never appears in the ConfigMap/Secret config payload.
-	var modelEnv []corev1.EnvVar
-	if !model.Spec.APIKeyPassthrough && model.Spec.APIKeySecret != "" {
-		modelEnv = append(modelEnv, corev1.EnvVar{
-			Name: apiKeyEnv,
-			ValueFrom: &corev1.EnvVarSource{
-				SecretKeyRef: &corev1.SecretKeySelector{
-					LocalObjectReference: corev1.LocalObjectReference{Name: model.Spec.APIKeySecret},
-					Key:                  model.Spec.APIKeySecretKey,
-				},
-			},
-		})
-	}
-
-	dep, err := resolveAuraDeployment(agent, modelEnv)
+	dep, err := resolveAuraDeployment(agent, mdd.EnvVars, mdd.Volumes, mdd.VolumeMounts)
 	if err != nil {
 		return "", nil, nil, err
 	}
@@ -279,7 +310,7 @@ func (a *adkApiTranslator) auraResolveRemoteMCPServer(ctx context.Context, agent
 // AURA image, the A2A/config environment, and the shared deployment knobs from
 // the declarative deployment spec. The config volume itself is mounted by
 // buildConfigSecret.
-func resolveAuraDeployment(agent v1alpha2.AgentObject, modelEnv []corev1.EnvVar) (*resolvedDeployment, error) {
+func resolveAuraDeployment(agent v1alpha2.AgentObject, modelEnv []corev1.EnvVar, modelVolumes []corev1.Volume, modelVolumeMounts []corev1.VolumeMount) (*resolvedDeployment, error) {
 	spec := agent.GetAgentSpec()
 
 	deploySpec := v1alpha2.DeclarativeDeploymentSpec{}
@@ -308,6 +339,10 @@ func resolveAuraDeployment(agent v1alpha2.AgentObject, modelEnv []corev1.EnvVar)
 	envVars := append(auraEnv, modelEnv...)
 	envVars = append(envVars, deploySpec.Env...)
 
+	// Model-derived volumes (e.g. a pinned TLS CA bundle) plus any user volumes.
+	volumes := append(slices.Clone(deploySpec.Volumes), modelVolumes...)
+	volumeMounts := append(slices.Clone(deploySpec.VolumeMounts), modelVolumeMounts...)
+
 	imagePullPolicy := corev1.PullPolicy(DefaultImageConfig.PullPolicy)
 	if deploySpec.ImagePullPolicy != "" {
 		imagePullPolicy = corev1.PullPolicy(deploySpec.ImagePullPolicy)
@@ -321,8 +356,8 @@ func resolveAuraDeployment(agent v1alpha2.AgentObject, modelEnv []corev1.EnvVar)
 		ImagePullPolicy:      imagePullPolicy,
 		Replicas:             deploySpec.Replicas,
 		ImagePullSecrets:     slices.Clone(deploySpec.ImagePullSecrets),
-		Volumes:              slices.Clone(deploySpec.Volumes),
-		VolumeMounts:         slices.Clone(deploySpec.VolumeMounts),
+		Volumes:              volumes,
+		VolumeMounts:         volumeMounts,
 		Labels:               getDefaultLabels(agent.GetName(), deploySpec.Labels),
 		Annotations:          deploySpec.Annotations,
 		Env:                  envVars,
@@ -363,8 +398,16 @@ func renderAuraConfigTOML(in auraConfigInput) string {
 
 	b.WriteString("[agent.llm]\n")
 	fmt.Fprintf(&b, "provider = %s\n", tomlString(in.Provider))
-	fmt.Fprintf(&b, "api_key = %s\n", tomlString(fmt.Sprintf("{{ env.%s }}", in.APIKeyEnv)))
+	if in.APIKeyEnv != "" {
+		fmt.Fprintf(&b, "api_key = %s\n", tomlString(fmt.Sprintf("{{ env.%s }}", in.APIKeyEnv)))
+	}
 	fmt.Fprintf(&b, "model = %s\n", tomlString(in.Model))
+	if in.BaseURL != "" {
+		fmt.Fprintf(&b, "base_url = %s\n", tomlString(in.BaseURL))
+	}
+	if in.Region != "" {
+		fmt.Fprintf(&b, "region = %s\n", tomlString(in.Region))
+	}
 
 	for _, s := range in.Servers {
 		b.WriteString("\n")
@@ -383,6 +426,15 @@ func renderAuraConfigTOML(in auraConfigInput) string {
 			}
 			fmt.Fprintf(&b, "headers = { %s }\n", strings.Join(pairs, ", "))
 		}
+	}
+
+	// Append the optional raw-TOML overlay verbatim. It is intended to add new
+	// top-level tables (e.g. [orchestration], [[vector_stores]]); it cannot
+	// override keys already emitted in [agent]/[agent.llm].
+	if overlay := strings.TrimSpace(in.Overlay); overlay != "" {
+		b.WriteString("\n# --- overlay from spec.declarative.auraConfigFrom ---\n")
+		b.WriteString(overlay)
+		b.WriteString("\n")
 	}
 
 	return b.String()

@@ -7772,6 +7772,33 @@ spec:
                         minItems: 1
                         type: array
                     type: object
+                  auraConfigFrom:
+                    description: |-
+                      AuraConfigFrom references a ConfigMap or Secret key containing extra Mezmo
+                      AURA TOML that is appended to the config kagent generates from this spec.
+                      Only meaningful when runtime is "aura". Use it for AURA-only features such
+                      as turn_depth, [orchestration], [[vector_stores]], and additional
+                      [mcp.servers.*] tables. The referenced content should add new top-level
+                      tables; it cannot override keys in the generated [agent]/[agent.llm] tables.
+                    properties:
+                      key:
+                        description: The key of the ConfigMap or Secret.
+                        maxLength: 253
+                        type: string
+                      name:
+                        description: The name of the ConfigMap or Secret.
+                        maxLength: 253
+                        type: string
+                      type:
+                        enum:
+                        - ConfigMap
+                        - Secret
+                        type: string
+                    required:
+                    - key
+                    - name
+                    - type
+                    type: object
                   context:
                     description: |-
                       Context configures context management for this agent.

@@ -1,0 +1,36 @@
+operation: translateAgent
+targetObject: aura-bedrock
+namespace: test
+objects:
+  - apiVersion: v1
+    kind: Secret
+    metadata:
+      name: aws-creds
+      namespace: test
+    data:
+      # base64 of "AKIAEXAMPLE" / "secretkey"
+      AWS_ACCESS_KEY_ID: QUtJQUVYQU1QTEU=
+      AWS_SECRET_ACCESS_KEY: c2VjcmV0a2V5
+  - apiVersion: kagent.dev/v1alpha2
+    kind: ModelConfig
+    metadata:
+      name: bedrock-model
+      namespace: test
+    spec:
+      provider: Bedrock
+      model: us.anthropic.claude-3-5-sonnet-20241022-v2:0
+      apiKeySecret: aws-creds
+      bedrock:
+        region: us-east-1
+  - apiVersion: kagent.dev/v1alpha2
+    kind: Agent
+    metadata:
+      name: aura-bedrock
+      namespace: test
+    spec:
+      type: Declarative
+      declarative:
+        runtime: aura
+        description: An AURA agent backed by Bedrock
+        systemMessage: You are an SRE assistant.
+        modelConfig: bedrock-model
