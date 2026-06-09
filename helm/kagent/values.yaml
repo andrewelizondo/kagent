@@ -181,6 +181,10 @@ controller:
     repository: kagent-dev/kagent/app
     tag: "" # Will default to global, then Chart version
     pullPolicy: ""
+  # -- The container image used for declarative agents with runtime "aura" (Mezmo AURA).
+  # AURA is an external image, so this is a full image reference rather than split
+  # registry/repository/tag. Leave empty to use the controller default (mezmo/aura:1-latest).
+  auraImage: ""
   # -- The image used by the skills-init container to clone skills from Git and pull OCI skill images.
   skillsInitImage:
     registry: ""

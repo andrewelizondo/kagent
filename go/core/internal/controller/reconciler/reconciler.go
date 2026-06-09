@@ -881,6 +881,29 @@ func (a *kagentReconciler) validateRuntimeFeatures(agent v1alpha2.AgentObject) s
 		runtime = v1alpha2.DeclarativeRuntime_Python
 	}
 
+	// Aura runtime: it renders AURA TOML from systemMessage, modelConfig, and MCP
+	// tools. Agent-runtime features handled by the kagent ADK do not apply.
+	if runtime == v1alpha2.DeclarativeRuntime_Aura {
+		var unsupported []string
+		if decl.Memory != nil {
+			unsupported = append(unsupported, "memory")
+		}
+		if decl.Context != nil {
+			unsupported = append(unsupported, "context management")
+		}
+		if decl.ExecuteCodeBlocks != nil && *decl.ExecuteCodeBlocks {
+			unsupported = append(unsupported, "code execution (executeCodeBlocks)")
+		}
+		if decl.PromptTemplate != nil {
+			unsupported = append(unsupported, "prompt templates")
+		}
+		if len(unsupported) == 0 {
+			return ""
+		}
+		return fmt.Sprintf("The following features are not supported by the aura runtime and will be ignored: %s.",
+			strings.Join(unsupported, ", "))
+	}
+
 	// Python runtime supports all features
 	if runtime != v1alpha2.DeclarativeRuntime_Go {
 		return ""

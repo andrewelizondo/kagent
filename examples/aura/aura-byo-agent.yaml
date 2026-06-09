@@ -1,0 +1,93 @@
+# Mezmo AURA on kagent — Phase 0 (BYO agent, no controller changes required).
+#
+# AURA (https://github.com/mezmo/aura) serves an A2A interface on port 8080 when
+# AURA_ENABLE_A2A=true, with its agent card at /.well-known/agent-card.json — exactly
+# the path kagent's BYO readiness probe targets. That makes AURA a drop-in BYO agent.
+#
+# Apply into the `kagent` namespace (kubectl apply -f aura-byo-agent.yaml -n kagent),
+# after editing the Secret to hold a real API key.
+---
+# LLM API key. Referenced from the AURA TOML via {{ env.OPENAI_API_KEY }} and injected
+# into the container as an env var below — the key never appears in the ConfigMap.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: aura-llm
+  namespace: kagent
+type: Opaque
+stringData:
+  OPENAI_API_KEY: "sk-replace-me"
+---
+# AURA configuration as TOML. Mounted read-only at CONFIG_PATH. Secrets use the
+# {{ env.VAR }} placeholder so nothing sensitive is stored here.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aura-sre-byo-config
+  namespace: kagent
+data:
+  config.toml: |
+    [agent]
+    name = "AURA SRE"
+    alias = "aura-sre"
+    system_prompt = "You are an SRE assistant. Investigate alerts and surface root cause with supporting evidence."
+    turn_depth = 4
+
+    [agent.llm]
+    provider = "openai"
+    api_key = "{{ env.OPENAI_API_KEY }}"
+    model = "gpt-5.2"
+    context_window = 128000
+
+    # Point AURA at any in-cluster MCP server. This example targets the kagent
+    # controller's own /mcp endpoint so the AURA agent can invoke other kagent
+    # agents as tools (list_agents / invoke_agent). Swap in the Mezmo telemetry
+    # MCP server, runbooks, ticketing, etc. as needed.
+    [mcp.servers.kagent]
+    transport = "http_streamable"
+    url = "http://kagent-controller.kagent.svc:8083/mcp"
+---
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: aura-sre-byo
+  namespace: kagent
+spec:
+  type: BYO
+  description: "Mezmo AURA SRE agent (BYO)"
+  byo:
+    deployment:
+      image: mezmo/aura:1-latest
+      # AURA's web server binary; --verbose mirrors the upstream docker-compose.
+      cmd: "./aura-web-server"
+      args:
+        - "--verbose"
+      env:
+        - name: HOST
+          value: "0.0.0.0"
+        - name: PORT
+          value: "8080"
+        # Serve the A2A interface (agent card + message endpoints) so kagent can
+        # discover, probe, and invoke this agent like any other A2A agent.
+        - name: AURA_ENABLE_A2A
+          value: "true"
+        # External origin AURA publishes in its agent card. Use the in-cluster
+        # Service DNS name kagent creates for this agent (named after the Agent).
+        - name: AURA_SERVER_URL
+          value: "http://aura-sre-byo.kagent.svc:8080"
+        - name: CONFIG_PATH
+          value: "/app/config/config.toml"
+        # Resolves the {{ env.OPENAI_API_KEY }} placeholder in the TOML above.
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: aura-llm
+              key: OPENAI_API_KEY
+      volumes:
+        - name: aura-config
+          configMap:
+            name: aura-sre-byo-config
+      volumeMounts:
+        - name: aura-config
+          mountPath: /app/config
+          readOnly: true

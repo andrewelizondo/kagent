@@ -10773,10 +10773,15 @@ spec:
                       Runtime specifies which ADK implementation to use for this agent.
                       - "python": Uses the Python ADK (default, slower startup, full feature set)
                       - "go": Uses the Go ADK (faster startup, most features supported)
+                      - "aura": Runs on Mezmo AURA. kagent renders AURA's TOML from systemMessage,
+                        modelConfig, and tools, and deploys the AURA image. Supports OpenAI and Anthropic
+                        model providers; agent-runtime features such as memory and context compaction do
+                        not apply.
                       The runtime determines both the container image and readiness probe configuration.
                     enum:
                     - python
                     - go
+                    - aura
                     type: string
                   stream:
                     description: |-

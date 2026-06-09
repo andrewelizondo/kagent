@@ -1,0 +1,65 @@
+# Mezmo AURA on kagent — Phase 1 (first-class `runtime: aura`).
+#
+# Unlike the Phase 0 BYO example, here you write an ordinary declarative Agent. kagent
+# renders AURA's TOML from the systemMessage, the referenced ModelConfig, and the MCP tools,
+# deploys the mezmo/aura image with A2A enabled, and injects the model API key from the
+# ModelConfig's Secret. No TOML, no image wiring, no manual env.
+#
+# Requires kagent with the `aura` runtime (DeclarativeRuntime enum includes "aura").
+# Apply into the `kagent` namespace after setting a real key in the Secret.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openai-secret
+  namespace: kagent
+type: Opaque
+stringData:
+  api-key: "sk-replace-me"
+---
+# Standard kagent ModelConfig — reused as-is by the aura runtime. Supported providers for
+# the aura runtime today: OpenAI and Anthropic.
+apiVersion: kagent.dev/v1alpha2
+kind: ModelConfig
+metadata:
+  name: aura-model
+  namespace: kagent
+spec:
+  provider: OpenAI
+  model: gpt-5.2
+  apiKeySecret: openai-secret
+  apiKeySecretKey: api-key
+---
+# A RemoteMCPServer the AURA agent will use as a tool. Point this at the Mezmo telemetry
+# MCP server, runbooks, ticketing, or — as here — the kagent controller's own /mcp endpoint
+# so the AURA agent can invoke other kagent agents.
+apiVersion: kagent.dev/v1alpha2
+kind: RemoteMCPServer
+metadata:
+  name: kagent-agents
+  namespace: kagent
+spec:
+  url: http://kagent-controller.kagent.svc:8083/mcp
+  description: "kagent agents exposed as MCP tools"
+  protocol: STREAMABLE_HTTP
+---
+apiVersion: kagent.dev/v1alpha2
+kind: Agent
+metadata:
+  name: aura-sre
+  namespace: kagent
+spec:
+  type: Declarative
+  description: "Mezmo AURA SRE agent (first-class runtime)"
+  declarative:
+    runtime: aura
+    modelConfig: aura-model
+    systemMessage: |
+      You are an SRE assistant. Investigate alerts and surface root cause with
+      supporting evidence, using the available tools.
+    tools:
+      - type: McpServer
+        mcpServer:
+          name: kagent-agents
+          apiGroup: kagent.dev
+          kind: RemoteMCPServer

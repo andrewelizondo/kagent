@@ -18,6 +18,10 @@ type AgentManifestInputs struct {
 	Deployment      *resolvedDeployment
 	AgentCard       *server.AgentCard
 	SecretHashBytes []byte
+	// AuraConfigTOML, when non-empty, is the rendered Mezmo AURA TOML config for
+	// a declarative agent with runtime "aura". It is stored in the agent config
+	// Secret as config.toml and mounted into the AURA container.
+	AuraConfigTOML string
 }
 
 const MAX_DEPTH = 10
@@ -70,9 +74,17 @@ func (a *adkApiTranslator) CompileAgent(
 	var cfg *adk.AgentConfig
 	var dep *resolvedDeployment
 	var secretHashBytes []byte
+	var auraConfigTOML string
 
 	switch spec.Type {
 	case v1alpha2.AgentType_Declarative:
+		if spec.Declarative != nil && spec.Declarative.Runtime == v1alpha2.DeclarativeRuntime_Aura {
+			auraConfigTOML, dep, secretHashBytes, err = a.compileAuraAgent(ctx, agent)
+			if err != nil {
+				return nil, err
+			}
+			break
+		}
 		var mdd *modelDeploymentData
 		cfg, mdd, secretHashBytes, err = a.translateInlineAgent(ctx, agent)
 		if err != nil {
@@ -106,6 +118,7 @@ func (a *adkApiTranslator) CompileAgent(
 		Deployment:      dep,
 		AgentCard:       card,
 		SecretHashBytes: secretHashBytes,
+		AuraConfigTOML:  auraConfigTOML,
 	}, nil
 }
 
