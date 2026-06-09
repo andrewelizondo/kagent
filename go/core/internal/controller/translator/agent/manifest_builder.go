@@ -78,7 +78,7 @@ func (a *adkApiTranslator) BuildManifest(
 	outputs := &AgentOutputs{}
 	manifestCtx := newManifestContext(agent, inputs.Deployment)
 
-	configSecret, err := a.buildConfigSecret(manifestCtx, inputs.Config, inputs.Sandbox, inputs.AgentCard, inputs.SecretHashBytes)
+	configSecret, err := a.buildConfigSecret(manifestCtx, inputs.Config, inputs.Sandbox, inputs.AgentCard, inputs.SecretHashBytes, inputs.AuraConfigTOML)
 	if err != nil {
 		return nil, err
 	}
@@ -164,7 +164,32 @@ func (a *adkApiTranslator) buildConfigSecret(
 	sandboxCfg *v1alpha2.SandboxConfig,
 	card *server.AgentCard,
 	modelConfigSecretHashBytes []byte,
+	auraConfigTOML string,
 ) (*configSecretInputs, error) {
+	// Aura runtime: the config payload is TOML mounted at auraConfigDir, not the
+	// ADK config.json/agent-card.json. AURA serves its own A2A agent card.
+	if auraConfigTOML != "" {
+		hashData := append([]byte(nil), modelConfigSecretHashBytes...)
+		return &configSecretInputs{
+			secret: &corev1.Secret{
+				TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"},
+				ObjectMeta: manifestCtx.objectMeta(),
+				StringData: map[string]string{auraConfigSecretKey: auraConfigTOML},
+			},
+			volumes: []corev1.Volume{{
+				Name: "config",
+				VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{SecretName: manifestCtx.agent.GetName()},
+				},
+			}},
+			mounts: []corev1.VolumeMount{{Name: "config", MountPath: auraConfigDir, ReadOnly: true}},
+			hashInput: configHashInput{
+				agentCfg:   []byte(auraConfigTOML),
+				secretData: hashData,
+			},
+		}, nil
+	}
+
 	cfgJSON := ""
 	agentCard := ""
 	srtSettingsJSON := ""

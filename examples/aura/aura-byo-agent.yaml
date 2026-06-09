@@ -23,7 +23,7 @@ stringData:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: aura-sre-config
+  name: aura-sre-byo-config
   namespace: kagent
 data:
   config.toml: |
@@ -50,7 +50,7 @@ data:
 apiVersion: kagent.dev/v1alpha2
 kind: Agent
 metadata:
-  name: aura-sre
+  name: aura-sre-byo
   namespace: kagent
 spec:
   type: BYO
@@ -74,7 +74,7 @@ spec:
         # External origin AURA publishes in its agent card. Use the in-cluster
         # Service DNS name kagent creates for this agent (named after the Agent).
         - name: AURA_SERVER_URL
-          value: "http://aura-sre.kagent.svc:8080"
+          value: "http://aura-sre-byo.kagent.svc:8080"
         - name: CONFIG_PATH
           value: "/app/config/config.toml"
         # Resolves the {{ env.OPENAI_API_KEY }} placeholder in the TOML above.
@@ -86,7 +86,7 @@ spec:
       volumes:
         - name: aura-config
           configMap:
-            name: aura-sre-config
+            name: aura-sre-byo-config
       volumeMounts:
         - name: aura-config
           mountPath: /app/config

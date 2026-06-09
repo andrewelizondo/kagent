@@ -40,12 +40,17 @@ const (
 )
 
 // DeclarativeRuntime represents the runtime implementation for declarative agents
-// +kubebuilder:validation:Enum=python;go
+// +kubebuilder:validation:Enum=python;go;aura
 type DeclarativeRuntime string
 
 const (
 	DeclarativeRuntime_Python DeclarativeRuntime = "python"
 	DeclarativeRuntime_Go     DeclarativeRuntime = "go"
+	// DeclarativeRuntime_Aura runs the agent on Mezmo AURA (https://github.com/mezmo/aura).
+	// kagent renders AURA's TOML configuration from the declarative spec (system message,
+	// model config, and MCP tools) and deploys the AURA image, which serves the agent over
+	// A2A. Unlike the python/go runtimes, AURA is an external image rather than a kagent ADK.
+	DeclarativeRuntime_Aura DeclarativeRuntime = "aura"
 )
 
 // AgentSpec defines the desired state of Agent.
@@ -172,6 +177,10 @@ type DeclarativeAgentSpec struct {
 	// Runtime specifies which ADK implementation to use for this agent.
 	// - "python": Uses the Python ADK (default, slower startup, full feature set)
 	// - "go": Uses the Go ADK (faster startup, most features supported)
+	// - "aura": Runs on Mezmo AURA. kagent renders AURA's TOML from systemMessage,
+	//   modelConfig, and tools, and deploys the AURA image. Supports OpenAI and Anthropic
+	//   model providers; agent-runtime features such as memory and context compaction do
+	//   not apply.
 	// The runtime determines both the container image and readiness probe configuration.
 	// +optional
 	// +kubebuilder:default=python

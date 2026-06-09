@@ -1,7 +1,7 @@
 # EP-aura-runtime: First-class support for Mezmo AURA agents
 
 * Issue: TBD (kagent-dev/kagent)
-* Status: provisional
+* Status: provisional (Phase 0 + Phase 1 implemented)
 
 ## Background
 
@@ -95,11 +95,12 @@ fine on-ramp, but the UX is mediocre: TOML and kagent CRDs describe overlapping 
 (model, MCP servers), the operator wires the API-key env by hand, and there is no fleet-level
 consistency between an AURA agent's model config and the rest of the cluster.
 
-#### Phase 1 (ideal UX): a first-class `aura` runtime
+#### Phase 1 (ideal UX): a first-class `aura` runtime — **implemented**
 
-Add `aura` as a value of the existing `DeclarativeRuntime` enum
-(`go/api/v1alpha2/agent_types.go`), alongside `python` and `go`. Users then write an
-ordinary declarative `Agent` and the controller does the AURA-specific translation:
+`aura` is now a value of the `DeclarativeRuntime` enum
+(`go/api/v1alpha2/agent_types.go`), alongside `python` and `go`. Users write an
+ordinary declarative `Agent` and the controller does the AURA-specific translation
+(`go/core/internal/controller/translator/agent/aura.go`):
 
 ```yaml
 apiVersion: kagent.dev/v1alpha2
@@ -126,44 +127,45 @@ spec:
 The agent translator gains an AURA path (sibling to the ADK path in
 `go/core/internal/controller/translator/agent/`) that:
 
-1. **Renders the TOML** from the CRD:
+1. **Renders the TOML** from the CRD (`renderAuraConfigTOML`):
    - `declarative.systemMessage` / `systemMessageFrom` -> `[agent].system_prompt`
-   - `declarative.modelConfig` -> `[agent.llm]` (`provider`, `model`, `context_window`,
+   - `declarative.modelConfig` -> `[agent.llm]` (`provider`, `model`,
      `api_key = "{{ env.<VAR> }}"`). The `ModelProvider` enum maps onto AURA's provider
-     strings (`OpenAI`->`openai`, `Anthropic`->`anthropic`, `Bedrock`->`bedrock`, ...).
+     strings; **v1 supports `OpenAI` -> `openai` and `Anthropic` -> `anthropic`** and
+     returns a clear validation error for other providers rather than emitting broken
+     config. (Bedrock/Azure/Vertex have multi-value or file-based auth that needs more
+     than a single API-key env; deferred.)
    - each `tools[].mcpServer` -> a `[mcp.servers.<name>]` block with
-     `transport = "http_streamable"`, the resolved in-cluster URL, and `headers` populated
-     from the tool's `headersFrom`.
-2. **Writes the rendered TOML to a ConfigMap** owned by the Agent and mounts it at
-   `CONFIG_PATH`.
-3. **Deploys `mezmo/aura`** (image pinned by a Helm value, e.g.
-   `controller.aura.image`, overridable per-agent via `deployment.imageRegistry`) with
+     `transport` (`http_streamable`/`sse`), the resolved in-cluster URL, and `headers`.
+     MCP resolution reuses the existing RemoteMCPServer/MCPServer/Service translation
+     (proxy + egress handling included). Agent-to-agent tools are not yet supported on
+     this runtime (validation error).
+2. **Writes the rendered TOML to the agent config Secret** (`config.toml`, owned by the
+   Agent) and mounts it read-only at `/etc/aura`; `CONFIG_PATH` points at the file.
+3. **Deploys `mezmo/aura:1-latest`** (the default `DefaultAuraImage`, overridable via the
+   `--aura-image` flag / `AURA_IMAGE` env / `controller.auraImage` Helm value) with
    `AURA_ENABLE_A2A=true`, `AURA_SERVER_URL` set to the in-cluster service URL, and
-   `HOST=0.0.0.0`.
+   `HOST`/`PORT`. Command is `./aura-web-server --verbose`.
 4. **Injects the model secret** as an env var (the same Secret the ModelConfig already
-   references), so the `{{ env.VAR }}` placeholder resolves without plaintext in the ConfigMap.
-5. Reuses the existing BYO deployment machinery (Service, readiness probe on
+   references), so the `{{ env.VAR }}` placeholder resolves without plaintext in the Secret
+   payload. The ModelConfig's `Status.SecretHash` is folded into the pod config-hash so an
+   in-place key rotation rolls the pod.
+5. Reuses the existing deployment machinery (Service, readiness probe on
    `/.well-known/agent-card.json`, OTel env from `collectSharedEnv`, replicas, RBAC).
 
 Net result: AURA "feels native." The same `Agent`, `ModelConfig`, and `RemoteMCPServer`
 objects, the same dashboard, `kagent invoke`, tracing, and the same agent-as-MCP-tool
-exposure apply uniformly.
+exposure apply uniformly. `validateRuntimeFeatures` emits a soft warning when an aura agent
+configures kagent-ADK-only features (memory, context management, code execution, prompt
+templates) that the runtime ignores.
 
-**Escape hatch for AURA-only features.** AURA has knobs with no kagent equivalent
-(`turn_depth`, `[orchestration]`, `[[vector_stores]]`). Rather than grow the CRD to mirror
-AURA's whole schema, support an optional raw-TOML overlay merged into the generated config:
-
-```yaml
-    runtime: aura
-    # ...
-    auraConfigFrom:           # optional ConfigMap of extra TOML, deep-merged last
-      kind: ConfigMap
-      name: aura-sre-overrides
-```
-
-The simple case stays one-field-simple; power users get AURA's full expressiveness without
-the CRD chasing AURA's release cadence. This is the same philosophy as the OpenClaw harness,
-which generates config and lets the backend own the long tail.
+**Escape hatch for AURA-only features — deferred to Phase 2.** AURA has knobs with no
+kagent equivalent (`turn_depth`, `[orchestration]`, `[[vector_stores]]`). Rather than grow
+the CRD to mirror AURA's whole schema, a future `auraConfigFrom` raw-TOML overlay (a
+ConfigMap merged into the generated config) will expose them. Until then, advanced AURA-only
+deployments can use the Phase 0 BYO path with a hand-authored TOML. Keeping v1 focused on
+generation avoids a half-correct TOML merge and matches the OpenClaw-harness philosophy of
+generating config and letting the backend own the long tail.
 
 ### Direction 2 — kagent agents as AURA tools (bidirectional, works today)
 
@@ -205,23 +207,29 @@ back into AURA — all over A2A/MCP, all managed as kagent `Agent`s.
 
 ### Rollout
 
-- **Phase 0** — ship `examples/aura/` (this change): AURA-as-BYO, works today, no code.
-- **Phase 1** — `runtime: aura` translator + `controller.aura.image` Helm value +
-  `auraConfigFrom` overlay; E2E coverage; `kagent init aura` scaffolding.
-- **Phase 2** — typed first-class fields for orchestration/RAG if demand warrants; list
-  AURA agents in the public agent catalog.
+- **Phase 0 (done)** — `examples/aura/`: AURA-as-BYO, works today, no code.
+- **Phase 1 (done)** — `runtime: aura` translator (`aura.go`) + `controller.auraImage`
+  Helm value / `--aura-image` flag + OpenAI/Anthropic provider mapping + MCP-tool
+  rendering + unit and golden tests + `examples/aura/aura-runtime-agent.yaml`.
+- **Phase 2 (next)** — `auraConfigFrom` raw-TOML overlay; additional providers
+  (Bedrock/Azure/Vertex); E2E coverage against a live AURA image; `kagent init aura`
+  scaffolding; typed orchestration/RAG fields if demand warrants; list AURA agents in
+  the public agent catalog.
 
 ### Test Plan
 
-- **Unit (Go):** table-driven tests for the AURA TOML renderer — provider mapping for each
-  `ModelProvider`, MCP-server block generation from `tools`, secret-ref env injection,
-  `systemMessage`/`systemMessageFrom` resolution, and overlay deep-merge precedence. Mock
-  the K8s client; assert on the generated ConfigMap + Deployment.
-- **E2E:** deploy a `runtime: aura` agent against a stub MCP server and a mock model
-  endpoint; assert the pod becomes Ready via the agent-card probe, that `kagent invoke`
-  returns over A2A, and that the agent is invokable as a `type: Agent` tool by a second agent.
-- **Phase 0 example validation:** CI lint/apply of `examples/aura/` manifests against the
-  CRD schema (dry-run server-side validation).
+- **Unit (Go) — done:** table-driven tests for the AURA TOML renderer and provider mapping
+  (`aura_test.go`): provider mapping for OpenAI/Anthropic and rejection of unsupported
+  providers, TOML basic-string escaping, TOML key sanitization, and full config rendering
+  (with/without MCP servers, sorted headers).
+- **Golden — done:** `testdata/inputs/agent_aura_runtime.yaml` ->
+  `testdata/outputs/agent_aura_runtime.json` exercises the full translation (config Secret
+  with rendered TOML, AURA Deployment with image/env/probe, Service, ServiceAccount) and is
+  checked in CI alongside the existing golden suite.
+- **E2E (Phase 2):** deploy a `runtime: aura` agent against a stub MCP server and a mock
+  model endpoint; assert the pod becomes Ready via the agent-card probe, that `kagent
+  invoke` returns over A2A, and that the agent is invokable as a `type: Agent` tool by a
+  second agent.
 
 ## Alternatives
 
